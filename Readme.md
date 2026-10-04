@@ -198,8 +198,17 @@ draftnight/
   room.py      state machine, clock, agent scheduling, event broadcast
   players.py   CSV loading with loose column matching
   server.py    Flask routes and the server-sent event stream
-static/        host.html for the TV, play.html for phones, one stylesheet
+static/
+  common.js    shared by both views: escaping, fetch, the event stream,
+               the countdown loop, toasts, and the player card
+  host.html    the TV: a centred stage, scoreboard strip along the bottom
+  play.html    phones: purse, the card, one big bid button
+  app.css      one stylesheet, one set of colour and type tokens
 ```
+
+Both views connect the same way and run the same clock, so that lives in one
+file rather than two copies that drift apart. Each page holds only the markup
+that is actually its own.
 
 Flask and server-sent events rather than websockets, because two dependencies
 and no build step means a phone needs nothing but a browser. System fonts

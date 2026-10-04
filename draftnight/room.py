@@ -505,6 +505,7 @@ class Room:
                 if self.phase == "bidding"
                 else 0.0,
                 "lot_seconds": self.timing.lot,
+                "snipe_seconds": self.timing.snipe,
                 "bids": [
                     {"manager": b.manager, "amount": b.amount, "is_ai": b.is_ai}
                     for b in reversed(self.bid_log[-8:])
