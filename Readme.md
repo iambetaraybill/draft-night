@@ -1,5 +1,7 @@
 # Draft Night
 
+[![tests](https://github.com/iambetaraybill/draft-night/actions/workflows/tests.yml/badge.svg)](https://github.com/iambetaraybill/draft-night/actions/workflows/tests.yml)
+
 An auction draft for a living room full of friends. Everyone bids from their
 phone, the TV shows the lot on the block, and whoever couldn't make it is
 represented by a proxy manager: a local open-weight model that bids on their
@@ -181,6 +183,11 @@ python tests/smoke.py http://127.0.0.1:7111
 
 It checks every squad ends up full and formation-legal, nobody goes negative,
 and the proxy manager actually buys players.
+
+Both run on every push, across Python 3.10 to 3.13. The pipeline also asserts
+the committed sample pool still matches its generator, that the CSV loader
+survives a deliberately messy two-thousand-row export, and that the pages and
+event stream all respond. See `.github/workflows/tests.yml`.
 
 ## How it's put together
 

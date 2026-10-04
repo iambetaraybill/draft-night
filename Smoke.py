@@ -10,13 +10,16 @@ Run:
   python tests/smoke.py http://127.0.0.1:7111
 """
 
+import os
 import sys
 import time
 
 import requests
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7111"
-HEAD = {"X-Host-Token": "test"}
+# Must match the token the server was started with, or every host action
+# comes back 403 and the auction silently never begins.
+HEAD = {"X-Host-Token": os.environ.get("DRAFT_HOST_TOKEN", "test")}
 FAILURES = []
 
 
@@ -60,12 +63,21 @@ def main() -> int:
     print("\nbidding")
     s = state()
     check("a lot is live", s["phase"] == "bidding" and s["lot"] is not None)
+    if s["phase"] != "bidding":
+        # Everything below assumes a live lot. Carrying on would produce a
+        # wall of misleading failures instead of naming the real problem.
+        print(f"\n  auction never started (phase {s['phase']}). Check the host token.")
+        return 1
 
-    lot = s["lot"]
     r = requests.post(
         f"{BASE}/api/bid", json={"mid": seats["Rohit"], "amount": 10_000}, timeout=5
     )
-    check("absurd overbid refused", r.status_code == 400, r.json().get("error", "")[:60])
+    why = r.json().get("error", "")
+    check(
+        "absurd overbid refused on budget grounds",
+        r.status_code == 400 and "limit" in why.lower(),
+        why[:70],
+    )
 
     r = requests.post(
         f"{BASE}/api/bid", json={"mid": seats["Rohit"], "amount": s["next_bid"]}, timeout=5
@@ -134,8 +146,9 @@ def main() -> int:
             str(counts),
         )
 
-    agent = next(m for m in s["managers"] if m["is_ai"])
-    check("proxy manager bought players", len(agent["roster"]) > 0)
+    agent = next((m for m in s["managers"] if m["is_ai"]), None)
+    check("a proxy manager is in the room", agent is not None)
+    check("proxy manager bought players", bool(agent and agent["roster"]))
     check("valuations were made", s["stats"]["heuristic_calls"] > 0, str(s["stats"]))
 
     print(f"\n{len(FAILURES)} failures" if FAILURES else "\nall good")

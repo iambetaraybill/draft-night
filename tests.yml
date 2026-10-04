@@ -1,0 +1,118 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: unit tests (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Everything compiles
+        run: python -m compileall -q draftnight scripts tests
+
+      - name: Rules and agent tests
+        run: python -m unittest discover -s tests -t . -p "test_*.py" -v
+
+  draft:
+    name: run a whole draft end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      # The sample pool is generated from a fixed seed, so a committed pool
+      # that no longer matches its generator means one of them drifted.
+      - name: Sample pool is reproducible
+        run: |
+          python scripts/make_sample_pool.py
+          git diff --exit-code -- data/players_sample.csv
+
+      - name: Loader survives a messy export
+        run: |
+          python - <<'PY'
+          import csv, random
+          random.seed(7)
+          pos = ["ST, LW", "CB", "GK", "CDM, CM", "RW", "LWB", "CAM", "RB"]
+          with open("/tmp/messy.csv", "w", newline="") as f:
+              w = csv.writer(f)
+              w.writerow(["sofifa_id", "short_name", "player_positions",
+                          "overall", "club_name", "nationality_name"])
+              for i in range(2000):
+                  w.writerow([i, f"Player {i}", random.choice(pos),
+                              random.randint(55, 94), f"Club {i % 40}", "Narnia"])
+              w.writerow([9999, "", "GK", "", "", ""])
+              w.writerow([9998, "Broken Guy", "SWEEPER-KEEPER", "abc", "", ""])
+          PY
+          python scripts/load_players.py /tmp/messy.csv --out /tmp/pool.csv --managers 6
+
+      # Server start, interface checks and the auction all live in one step.
+      # A background server handed between steps relies on the runner not
+      # reaping it, which is a needless thing to depend on.
+      #
+      # The auction itself must finish with every squad full and formation
+      # legal, nobody negative, and the proxy manager actually winning
+      # players rather than sitting the night out.
+      - name: Run a whole draft
+        env:
+          DRAFT_HOST_TOKEN: ci
+          DRAFT_AGENT_DELAY_MIN: "0.2"
+          DRAFT_AGENT_DELAY_MAX: "0.6"
+        run: |
+          set -o pipefail
+          nohup python -m draftnight.server --no-llm --fast --port 7111 \
+            --managers 3 --max-players 42 > /tmp/server.log 2>&1 &
+          SERVER=$!
+          trap 'kill $SERVER 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7111/api/state > /dev/null && break
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:7111/api/state > /dev/null; then
+            echo "server never came up"
+            exit 1
+          fi
+          echo "server up on port 7111"
+
+          for path in / /play /static/app.css /api/bootstrap /api/state; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+              "http://127.0.0.1:7111${path}")
+            echo "  ${path} -> ${code}"
+            [ "$code" = "200" ] || exit 1
+          done
+
+          timeout 8 curl -sN --max-time 7 http://127.0.0.1:7111/events \
+            > /tmp/sse.txt || true
+          grep -q '^data: {' /tmp/sse.txt || { echo "no snapshots on /events"; exit 1; }
+          echo "  event stream delivers snapshots"
+
+          python tests/smoke.py http://127.0.0.1:7111
+
+      - name: Server log
+        if: always()
+        run: cat /tmp/server.log
