@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Draft Night</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app" class="tv"></div>
+
+<script>
+const token = new URLSearchParams(location.search).get("host") || "";
+let boot = {join_url: "", model: "", model_ok: false, model_note: ""};
+let snap = null;
+let clock = {left: 0, total: 14, at: 0};
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-Host-Token": token},
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "That did not work");
+  return data;
+}
+
+/* ---------- pieces ---------- */
+
+function rail(s) {
+  const lot = s.phase === "lobby"
+    ? "waiting to start"
+    : `lot ${s.lot_number} &middot; ${s.pool_left} left in the pool`;
+  return `<div class="rail">
+    <h1>Draft Night</h1>
+    <span class="muted">${lot}</span>
+    <span class="spacer"></span>
+    ${s.phase !== "lobby" ? `<span class="join muted">phones: <code>${esc(boot.join_url)}</code></span>` : ""}
+  </div>`;
+}
+
+function managerRow(m, s) {
+  const needs = Object.entries(m.needs).map(([p, n]) => `${n} ${p}`).join(" &middot; ");
+  const broke = m.max_bid < s.next_bid && !m.leading;
+  let tag = "";
+  if (m.is_ai && m.interested === null) tag = `<span class="tag">proxy</span>`;
+  else if (m.is_ai && m.interested) tag = `<span class="tag">proxy &middot; in</span>`;
+  else if (m.is_ai) tag = `<span class="tag thinking">proxy</span>`;
+  return `<div class="manager ${m.leading ? "leading" : ""} ${broke ? "broke" : ""}">
+    <div class="name">${esc(m.name)}${tag}</div>
+    <div class="left">${m.left}</div>
+    <div class="need">${needs || "squad complete"}</div>
+  </div>`;
+}
+
+function lotCard(s) {
+  const l = s.lot;
+  const bid = s.high_bid
+    ? `<span class="amount">${s.high_bid}</span>
+       <span class="holder">with <b>${esc(s.high_bidder_name)}</b></span>`
+    : `<span class="amount none">&mdash;</span>
+       <span class="holder muted">opening at ${s.min_bid}</span>`;
+  return `<section class="lot">
+    <span class="pos">${esc(l.pos)}</span>
+    <h2 class="who">${esc(l.name)}</h2>
+    <p class="vitals">rated <b>${l.rating}</b>${l.club ? " &middot; " + esc(l.club) : ""}${l.nation ? " &middot; " + esc(l.nation) : ""}</p>
+    <div class="bid-figure" id="bidfig">${bid}</div>
+    <div class="clock" id="clock"><span id="clockbar"></span></div>
+    <p class="clock-label" id="clocklabel"></p>
+  </section>`;
+}
+
+function resultCard(s) {
+  const r = s.result;
+  if (!r) return "";
+  if (r.price === null) {
+    return `<section class="result unsold">
+      <p class="stamp">No bids</p>
+      <p class="detail">${esc(r.player)} goes unsold.</p>
+    </section>`;
+  }
+  return `<section class="result">
+    <p class="stamp">Sold &mdash; ${r.price}</p>
+    <p class="detail">${esc(r.player)} (${esc(r.pos)}, rated ${r.rating}) to <b>${esc(r.winner)}</b></p>
+    ${r.reason ? `<p class="agent-said">${esc(r.reason)}</p>` : ""}
+  </section>`;
+}
+
+function ticker(s) {
+  if (!s.bids.length) return `<p class="muted">No bids yet.</p>`;
+  return `<ul class="ticker">${s.bids.map((b) =>
+    `<li><span>${esc(b.manager)}${b.is_ai ? " <span class=\"muted\">(proxy)</span>" : ""}</span>
+     <span class="amt">${b.amount}</span></li>`).join("")}</ul>`;
+}
+
+/* ---------- phases ---------- */
+
+function renderLobby(s) {
+  const seats = s.managers.map((m) =>
+    `<span class="seat ${m.is_ai ? "ai" : ""}">${esc(m.name)}${m.is_ai ? " &middot; proxy" : ""}</span>`
+  ).join("") || `<span class="muted">Nobody yet.</span>`;
+
+  const shape = Object.entries(s.formation).map(([p, n]) => `${n} ${p}`).join(", ");
+  const model = boot.model_ok
+    ? `Proxy managers think with <b>${esc(boot.model)}</b>, running on this laptop.`
+    : `<b>Heuristic mode.</b> ${esc(boot.model_note)}. Proxy managers will bid on
+       ratings alone until a model is available.`;
+
+  return rail(s) + `<div class="lobby">
+    <h2>Open this on your phone</h2>
+    <p class="url">${esc(boot.join_url)}</p>
+    <p>Same wifi as this laptop. Everyone gets ${s.managers[0]?.budget ?? 200} points
+       and a squad of ${Object.values(s.formation).reduce((a, b) => a + b, 0)}: ${shape}.<br>${model}</p>
+
+    <div class="seats">${seats}</div>
+
+    <div class="card">
+      <h2>Bidding for someone who can't be here</h2>
+      <div class="field">
+        <label for="agname">Their name</label>
+        <input id="agname" placeholder="Sam" maxlength="24">
+      </div>
+      <div class="field">
+        <label for="agstrat">Their instructions, in their own words</label>
+        <textarea id="agstrat" placeholder="I want pace up front above all else. Never spend more than 40% of my budget on one player, and get a keeper early so I'm not stuck with whoever is left."></textarea>
+      </div>
+      <div class="row">
+        <button id="addagent">Add proxy manager</button>
+        <span class="muted">They bid live, inside their budget, from what you paste here.</span>
+      </div>
+      <p class="error" id="agerr"></p>
+    </div>
+
+    <div class="row" style="margin-top:1.5rem">
+      <button id="start" ${s.managers.length < 2 ? "disabled" : ""}>Start the auction</button>
+      <span class="muted">${s.managers.length < 2 ? "Needs at least two managers." : `${s.managers.length} managers ready.`}</span>
+    </div>
+    <p class="error" id="starterr"></p>
+  </div>`;
+}
+
+function renderFloor(s) {
+  return rail(s) + `<div class="floor">
+    <div>${s.phase === "bidding" ? lotCard(s) : resultCard(s)}</div>
+    <div class="side">
+      <div class="card">
+        <h2>Managers</h2>
+        <div id="mgrs">${s.managers.map((m) => managerRow(m, s)).join("")}</div>
+      </div>
+      <div class="card">
+        <h2>Bids on this lot</h2>
+        <div id="tick">${ticker(s)}</div>
+      </div>
+    </div>
+  </div>
+  <div class="strip">
+    <span id="patter">${s.commentary ? esc(s.commentary) : `<span class="muted">${esc(s.notice || "")}</span>`}</span>
+    <span class="spacer"></span>
+    ${s.phase === "bidding" && token ? `<button class="quiet" id="hammer">Sell now</button>` : ""}
+  </div>`;
+}
+
+function renderReview(s) {
+  const squads = s.managers.map((m) => {
+    const rows = m.roster.map((r) =>
+      `<li><span>${esc(r.name)} <span class="muted">${esc(r.pos)} ${r.rating}</span></span>
+       <span class="pricetag">${r.price}</span></li>`).join("");
+    const empty = Array(m.slots_left).fill(
+      `<li class="slot-open"><span>unfilled</span><span></span></li>`).join("");
+    return `<div class="card">
+      <h2>${esc(m.name)}${m.is_ai ? " &middot; proxy" : ""} &mdash; ${m.budget - m.left} spent, ${m.left} unused</h2>
+      <ul class="plain">${rows}${empty}</ul>
+    </div>`;
+  }).join("");
+
+  const st = s.stats;
+  const note = s.llm
+    ? `${st.llm_calls} model calls, ${st.avg_latency_ms} ms average.
+       ${st.heuristic_calls} fell back to the heuristic.
+       ${st.clamped} asked to overspend and were capped.`
+    : `Heuristic mode: ${st.heuristic_calls} valuations, no model calls.`;
+
+  return rail(s) + `<div class="lobby"><h2>Final squads</h2>
+    <p>${s.unsold} players went unsold. ${note}</p></div>
+    <div class="squads">${squads}</div>`;
+}
+
+/* ---------- clock ---------- */
+
+function tickClock() {
+  const bar = el("clockbar");
+  if (bar && snap && snap.phase === "bidding") {
+    const gone = (performance.now() - clock.at) / 1000;
+    const left = Math.max(0, clock.left - gone);
+    bar.style.transform = `scaleX(${Math.min(1, left / clock.total)})`;
+    el("clock").classList.toggle("urgent", left <= 4);
+    const label = el("clocklabel");
+    if (label) {
+      label.textContent = left <= 0
+        ? "Going..."
+        : `${left.toFixed(1)}s left. Any bid puts 7 seconds back on the clock.`;
+    }
+  }
+  requestAnimationFrame(tickClock);
+}
+
+/* ---------- wiring ---------- */
+
+let lastKey = null;
+
+/* Patch only what changed. A full rebuild once a second would flicker on a
+   TV and, in the lobby, wipe a half-typed strategy under the host's hands. */
+function patch(s) {
+  const fig = el("bidfig");
+  if (fig && s.phase === "bidding") {
+    fig.innerHTML = s.high_bid
+      ? `<span class="amount">${s.high_bid}</span>
+         <span class="holder">with <b>${esc(s.high_bidder_name)}</b></span>`
+      : `<span class="amount none">&mdash;</span>
+         <span class="holder muted">opening at ${s.min_bid}</span>`;
+  }
+  const mgrs = el("mgrs");
+  if (mgrs) mgrs.innerHTML = s.managers.map((m) => managerRow(m, s)).join("");
+  const tick = el("tick");
+  if (tick) tick.innerHTML = ticker(s);
+  const patter = el("patter");
+  if (patter) {
+    patter.innerHTML = s.commentary
+      ? esc(s.commentary)
+      : `<span class="muted">${esc(s.notice || "")}</span>`;
+  }
+}
+
+function render() {
+  const s = snap;
+  if (!s) return;
+  const key = `${s.phase}:${s.lot_number}:${s.managers.length}`;
+  if (key === lastKey) {
+    patch(s);
+    return;
+  }
+  lastKey = key;
+
+  // Hold on to anything the host was typing before we rebuild under them.
+  const held = {name: el("agname")?.value, strategy: el("agstrat")?.value};
+
+  const app = el("app");
+  if (s.phase === "lobby") app.innerHTML = renderLobby(s);
+  else if (s.phase === "review") app.innerHTML = renderReview(s);
+  else app.innerHTML = renderFloor(s);
+
+  if (el("agname") && held.name) el("agname").value = held.name;
+  if (el("agstrat") && held.strategy) el("agstrat").value = held.strategy;
+
+  el("addagent")?.addEventListener("click", async () => {
+    const name = el("agname").value.trim();
+    const strategy = el("agstrat").value.trim();
+    try {
+      await post("/api/agent", {name, strategy});
+      el("agname").value = "";
+      el("agstrat").value = "";
+      el("agerr").textContent = "";
+    } catch (e) {
+      el("agerr").textContent = e.message;
+    }
+  });
+
+  el("start")?.addEventListener("click", async () => {
+    try {
+      await post("/api/start");
+    } catch (e) {
+      el("starterr").textContent = e.message;
+    }
+  });
+
+  el("hammer")?.addEventListener("click", () => post("/api/hammer").catch(() => {}));
+}
+
+async function main() {
+  boot = await fetch("/api/bootstrap").then((r) => r.json());
+  if (!token) {
+    document.title = "Draft Night (view only)";
+  }
+  const stream = new EventSource("/events");
+  stream.onmessage = (ev) => {
+    const next = JSON.parse(ev.data);
+    const phaseChanged = !snap || snap.phase !== next.phase
+      || snap.lot_number !== next.lot_number;
+    snap = next;
+    clock = {left: next.seconds_left, total: next.lot_seconds, at: performance.now()};
+    render();
+    if (phaseChanged) window.scrollTo(0, 0);
+  };
+  requestAnimationFrame(tickClock);
+}
+
+main();
+</script>
+</body>
+</html>
