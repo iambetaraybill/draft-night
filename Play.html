@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a1f1a">
+<title>Draft Night</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app" class="phone"></div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const SEAT = "draftnight.seat";
+let seat = null;
+let snap = null;
+let clock = {left: 0, total: 14, at: 0};
+let lastKey = null;
+
+try { seat = JSON.parse(localStorage.getItem(SEAT) || "null"); } catch (e) { seat = null; }
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+let toastTimer = null;
+function toast(msg) {
+  const t = el("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+}
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "That did not work");
+  return data;
+}
+
+function me() {
+  if (!seat || !snap) return null;
+  return snap.managers.find((m) => m.mid === seat.mid) || null;
+}
+
+/* ---------- screens ---------- */
+
+function renderJoin(s) {
+  const taken = s.managers.map((m) => esc(m.name)).join(", ");
+  if (s.phase !== "lobby") {
+    return `<h2 style="font-family:var(--display);font-size:2rem;margin:2rem 0 .5rem">
+      Auction under way</h2>
+      <p class="muted">You cannot join once the first lot is up. Watch the TV,
+      and ask the host to restart if you were meant to be in.</p>`;
+  }
+  return `<h2 style="font-family:var(--display);font-size:2.4rem;margin:1.5rem 0 .25rem">
+    Draft Night</h2>
+  <p class="muted">Put your name in. You get ${s.managers[0]?.budget ?? 200} points
+     and a squad of ${Object.values(s.formation).reduce((a, b) => a + b, 0)} to fill.</p>
+  <div class="field" style="margin-top:1.5rem">
+    <label for="nm">Your name</label>
+    <input id="nm" placeholder="Rohit" maxlength="24" autocomplete="off">
+  </div>
+  <button id="join" style="width:100%">Take a seat</button>
+  <p class="error" id="joinerr"></p>
+  ${taken ? `<p class="muted" style="margin-top:1.5rem">Already in: ${taken}</p>` : ""}`;
+}
+
+function renderWaiting(m, s) {
+  const needs = Object.entries(m.needs).map(([p, n]) => `${n} ${p}`).join(", ");
+  return `<div class="you">
+    <span class="nm">${esc(m.name)}</span>
+    <span class="purse">${m.left}</span>
+  </div>
+  <p class="muted">Waiting for the host to start. You still need ${needs}.</p>
+  <button class="quiet" id="leave" style="margin-top:1.5rem">Give up my seat</button>`;
+}
+
+function renderSquad(m, s) {
+  const rows = m.roster.map((r) =>
+    `<li><span>${esc(r.name)} <span class="muted">${esc(r.pos)} ${r.rating}</span></span>
+     <span class="pricetag">${r.price}</span></li>`).join("");
+  const open = Object.entries(m.needs).flatMap(([p, n]) =>
+    Array(n).fill(`<li class="slot-open"><span>${p} to fill</span><span></span></li>`)
+  ).join("");
+  return `<div class="mysquad">
+    <h2 style="font-size:.95rem;color:var(--chalk-dim);font-weight:600;margin:0 0 .5rem">
+      Your squad</h2>
+    <ul class="plain">${rows}${open}</ul>
+  </div>`;
+}
+
+function renderFloor(m, s) {
+  const l = s.lot;
+  const canBid = s.phase === "bidding" && l
+    && m.needs[l.pos] && m.max_bid >= s.next_bid && !m.leading;
+
+  let action;
+  if (s.phase !== "bidding" || !l) {
+    action = `<p class="muted">Next lot coming up.</p>`;
+  } else if (m.leading) {
+    action = `<button class="bid-big" disabled>You lead at ${s.high_bid}</button>
+      <p class="cap">Sit tight.</p>`;
+  } else if (!m.needs[l.pos]) {
+    action = `<button class="bid-big" disabled>No ${esc(l.pos)} slot left</button>
+      <p class="cap">You still need ${Object.entries(m.needs).map(([p, n]) => `${n} ${p}`).join(", ") || "nothing"}.</p>`;
+  } else if (m.max_bid < s.next_bid) {
+    action = `<button class="bid-big" disabled>Priced out</button>
+      <p class="cap">Your limit is ${m.max_bid} and the next bid is ${s.next_bid}.</p>`;
+  } else {
+    const jumps = [2, 5, 10]
+      .map((n) => s.next_bid + n)
+      .filter((v) => v <= m.max_bid);
+    action = `<button class="bid-big" id="bid" data-amount="${s.next_bid}">
+        Bid ${s.next_bid}</button>
+      ${jumps.length ? `<div class="jumps">${jumps.map((v) =>
+        `<button class="jump" data-amount="${v}">${v}</button>`).join("")}</div>` : ""}
+      <p class="cap">Most you can bid on him: ${m.max_bid}.
+        ${m.slots_left > 1 ? `${m.slots_left - 1} more slots to fill after this.` : "Last slot."}</p>`;
+  }
+
+  const standing = s.high_bid
+    ? `<b>${s.high_bid}</b> with ${esc(s.high_bidder_name)}`
+    : `no bids yet, opens at <b>${s.min_bid}</b>`;
+
+  return `<div class="you">
+    <span class="nm">${esc(m.name)}</span>
+    <span class="purse">${m.left}</span>
+  </div>
+  ${l ? `<div class="onblock">
+    <span class="muted">${esc(l.pos)} &middot; rated ${l.rating}${l.club ? " &middot; " + esc(l.club) : ""}</span>
+    <h2 class="who">${esc(l.name)}</h2>
+    <p class="standing">${standing}</p>
+    <div class="clock-slim" id="clock"><span id="clockbar"></span></div>
+  </div>` : ""}
+  ${action}
+  ${renderSquad(m, s)}`;
+}
+
+function renderReview(m, s) {
+  return `<div class="you">
+    <span class="nm">${esc(m.name)}</span>
+    <span class="purse">${m.left}</span>
+  </div>
+  <p class="muted">That's the draft done. ${m.budget - m.left} spent, ${m.left} left over.</p>
+  ${renderSquad(m, s)}`;
+}
+
+/* ---------- clock ---------- */
+
+function tickClock() {
+  const bar = el("clockbar");
+  if (bar && snap && snap.phase === "bidding") {
+    const gone = (performance.now() - clock.at) / 1000;
+    const left = Math.max(0, clock.left - gone);
+    bar.style.transform = `scaleX(${Math.min(1, left / clock.total)})`;
+    el("clock").classList.toggle("urgent", left <= 4);
+  }
+  requestAnimationFrame(tickClock);
+}
+
+/* ---------- wiring ---------- */
+
+function bind() {
+  el("join")?.addEventListener("click", async () => {
+    const name = el("nm").value.trim();
+    if (!name) { el("joinerr").textContent = "Needs a name."; return; }
+    try {
+      const data = await post("/api/join", {name});
+      seat = {mid: data.mid, name: data.name};
+      localStorage.setItem(SEAT, JSON.stringify(seat));
+      lastKey = null;
+      render();
+    } catch (e) {
+      el("joinerr").textContent = e.message;
+    }
+  });
+
+  el("leave")?.addEventListener("click", async () => {
+    try { await post("/api/leave", {mid: seat.mid}); } catch (e) { toast(e.message); return; }
+    localStorage.removeItem(SEAT);
+    seat = null;
+    lastKey = null;
+    render();
+  });
+
+  const send = async (amount) => {
+    try {
+      await post("/api/bid", {mid: seat.mid, amount});
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+
+  el("bid")?.addEventListener("click", (ev) => send(+ev.currentTarget.dataset.amount));
+  document.querySelectorAll(".jump").forEach((b) =>
+    b.addEventListener("click", (ev) => send(+ev.currentTarget.dataset.amount)));
+}
+
+function render() {
+  const s = snap;
+  if (!s) return;
+  const m = me();
+
+  // Seat from a previous auction, or the server restarted under us.
+  if (seat && !m) {
+    localStorage.removeItem(SEAT);
+    seat = null;
+  }
+
+  const key = m
+    ? `${s.phase}:${s.lot_number}:${s.high_bid}:${s.high_bidder}:${m.roster.length}:${m.left}`
+    : `join:${s.phase}:${s.managers.length}`;
+  if (key === lastKey) return;
+  lastKey = key;
+
+  const held = el("nm")?.value;
+  const app = el("app");
+
+  if (!m) app.innerHTML = renderJoin(s);
+  else if (s.phase === "lobby") app.innerHTML = renderWaiting(m, s);
+  else if (s.phase === "review") app.innerHTML = renderReview(m, s);
+  else app.innerHTML = renderFloor(m, s);
+
+  if (el("nm") && held) el("nm").value = held;
+  bind();
+}
+
+function main() {
+  const stream = new EventSource("/events");
+  stream.onmessage = (ev) => {
+    snap = JSON.parse(ev.data);
+    clock = {left: snap.seconds_left, total: snap.lot_seconds, at: performance.now()};
+    render();
+  };
+  stream.onerror = () => toast("Lost the connection. Reconnecting...");
+  requestAnimationFrame(tickClock);
+}
+
+main();
+</script>
+</body>
+</html>
