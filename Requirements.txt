@@ -1,0 +1,3 @@
+# Draft Night runs on two packages. That is the whole dependency list.
+Flask>=3.0
+requests>=2.31
