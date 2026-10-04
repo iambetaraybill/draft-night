@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
+# Your own player data stays local. Ratings scraped from someone else's
+# database are not yours to redistribute, so only the synthetic sample
+# pool is committed.
+data/*.csv
+!data/players_sample.csv
