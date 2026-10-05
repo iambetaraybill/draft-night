@@ -2,6 +2,7 @@
 
 [![tests](https://github.com/iambetaraybill/draft-night/actions/workflows/tests.yml/badge.svg)](https://github.com/iambetaraybill/draft-night/actions/workflows/tests.yml)
 
+
 An auction draft for a living room full of friends. Everyone bids from their
 phone, the TV shows the lot on the block, and whoever couldn't make it is
 represented by a proxy manager: a local open-weight model that bids on their
@@ -9,6 +10,7 @@ behalf, inside their budget, from instructions they wrote in plain English.
 
 Runs on one laptop over your own wifi. No accounts, no cloud, no internet, no
 API keys, nothing to pay per bid.
+
 
 ```
   GK
